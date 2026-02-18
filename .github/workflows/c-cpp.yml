@@ -9,13 +9,16 @@ on:
 
   pull_request:
     types: [opened, reopened, synchronize]
+
   release:
     types: [published]
+
   workflow_dispatch:
 
 jobs:
+
   windows:
-    name: 'Windows'
+    name: Windows
     runs-on: windows-2025
 
     env:
@@ -32,24 +35,6 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-# TODO: add support of 141_xp toolchain at VS2022+
-#      - name: Install v140, v141 and v142 toolsets
-#        shell: cmd
-#        run: |
-#          "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe" modify ^
-#          --installPath "C:\Program Files\Microsoft Visual Studio\2022\Enterprise" ^
-#          --add Microsoft.VisualStudio.Component.WindowsXP ^
-#          --add Microsoft.VisualStudio.Component.VC.v140 ^
-#          --add Microsoft.VisualStudio.Component.VC.v140.x86.x64 ^
-#          --add Microsoft.VisualStudio.Component.VC.v140.xp ^
-#          --add Microsoft.VisualStudio.Component.VC.140.CRT ^
-#          --add Microsoft.VisualStudio.Component.VC.v141 ^
-#          --add Microsoft.VisualStudio.Component.VC.v141.x86.x64 ^
-#          --add Microsoft.VisualStudio.Component.VC.v141.xp ^
-#          --add Microsoft.VisualStudio.Component.VC.v142 ^
-#          --add Microsoft.VisualStudio.Component.VC.v142.x86.x64 ^
-#          --quiet --norestart
-
       - name: Select PlatformToolset
         id: select_toolset
         shell: pwsh
@@ -60,21 +45,21 @@ jobs:
           
           if ($vs2019) {
             "toolset=v140_xp" >> $env:GITHUB_OUTPUT
-            Write-Host "Selected v140_xp toolset"
           } elseif ($vs2022) {
             "toolset=v143" >> $env:GITHUB_OUTPUT
-            Write-Host "Selected v143 toolset"
           } else {
             Write-Error "No suitable Visual Studio installation found"
             exit 1
           }
 
       - name: Build
+        shell: pwsh
         run: |
           $toolset = '${{ steps.select_toolset.outputs.toolset }}'
           msbuild ${{ env.solution }} -p:Configuration="${{ env.buildRelease }}" /t:Clean,Build /p:Platform=${{ env.buildPlatform }} /p:PlatformToolset=$toolset /p:XPDeprecationWarning=false
 
       - name: Copy Binary files
+        shell: pwsh
         run: |
           mkdir publish\addons\resemiclip
           move msvc\${{ env.buildRelease }}\resemiclip_mm.dll publish\addons\resemiclip\resemiclip_mm.dll
@@ -84,64 +69,58 @@ jobs:
         shell: pwsh
         run: |
           $versionFile = "version/appversion.h"
-          if (-not (Test-Path $versionFile)) {
-            Write-Error "Version file not found: $versionFile"
-            exit 1
-          }
-
           $content = Get-Content $versionFile
           foreach ($line in $content) {
             if ($line -match '^\s*#define\s+APP_VERSION\s+"([^"]+)"') {
               $version = $matches[1]
               "version=$version" >> $env:GITHUB_OUTPUT
-              Write-Host "Found version: $version"
               exit 0
             }
           }
-          Write-Error "APP_VERSION not found in file"
+          Write-Error "APP_VERSION not found"
           exit 1
 
-      - name: Show version
-        run: echo "Version is ${{ steps.get_version.outputs.version }}"
+      - name: Install rcedit
+        shell: pwsh
+        run: choco install rcedit -y
 
-      - name: Get rcedit from chocolatey
+      - name: Edit resources
         shell: pwsh
         run: |
-          choco install rcedit -y
+          rcedit publish\addons\resemiclip\resemiclip_mm.dll `
+            --set-version-string ProductName "ReSemiclip - resemiclip_mm.dll" `
+            --set-file-version "${{ steps.get_version.outputs.version }}" `
+            --set-product-version "${{ steps.get_version.outputs.version }}" `
+            --set-version-string FileDescription "ReSemiclip - Commit: $env:GITHUB_SHA" `
+            --set-version-string Comments "Commit: $env:GITHUB_SHA" `
+            --set-version-string CompanyName "ReHLDS Dev Team" `
+            --set-version-string LegalCopyright "Copyright 2025 Valve, ReHLDS DevTeam" `
+            --set-icon msvc/icon.ico
 
-      - name: Edit resources at windows binaries
-        run: |
-         rcedit ${{ github.workspace }}\publish\addons\resemiclip\resemiclip_mm.dll --set-version-string ProductName "ReSemiclip - resemiclip_mm.dll" --set-file-version "${{ steps.get_version.outputs.version }}" --set-product-version "${{ steps.get_version.outputs.version }}" --set-version-string FileDescription "ReSemiclip - This module allows to pass through players, Commit: $env:GITHUB_SHA" --set-version-string "Comments" "Commit: $env:GITHUB_SHA" --set-version-string CompanyName "ReHLDS Dev Team" --set-version-string LegalCopyright "Copyright 2025 Valve, ReHLDS DevTeam" --set-icon msvc/icon.ico
-        shell: "pwsh"
-
-      - name: Import PFX and sign
-        if: github.event_name != 'pull_request'
+      - name: Sign DLL
+        if: github.event_name == 'release'
+        shell: pwsh
         env:
           KEY_PFX_PASS: ${{ secrets.KEY_PFX_PASS }}
-        # https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md
         run: |
-               $pfxBase64 = "${{ secrets.KEY_PFX_B64 }}"
-               [IO.File]::WriteAllBytes("${{ github.workspace }}\signing-cert.pfx", [Convert]::FromBase64String($pfxBase64))
-               certutil -f -p "${{ secrets.KEY_PFX_PASS }}" -importPFX "${{ github.workspace }}\signing-cert.pfx"
-               & 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x86\signtool.exe' sign /a /f "${{ github.workspace }}\signing-cert.pfx"  /p $env:KEY_PFX_PASS /d "ReSemiclip - resemiclip_mm.dll" /du "https://rehlds.dev/" /tr "http://timestamp.digicert.com" /td sha256 /fd sha256 /v ${{ github.workspace }}\publish\addons\resemiclip\resemiclip_mm.dll
-               Remove-Item -Recurse -Force "${{ github.workspace }}\signing-cert.pfx"
-        shell: "pwsh"
+          [IO.File]::WriteAllBytes("signing-cert.pfx", [Convert]::FromBase64String("${{ secrets.KEY_PFX_B64 }}"))
+          certutil -f -p "${{ secrets.KEY_PFX_PASS }}" -importPFX signing-cert.pfx
+          & 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x86\signtool.exe' sign /a /f signing-cert.pfx /p $env:KEY_PFX_PASS /fd sha256 /tr http://timestamp.digicert.com /td sha256 publish\addons\resemiclip\resemiclip_mm.dll
+          Remove-Item signing-cert.pfx
 
-      - name: Deploy artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: win32
           path: publish/*
 
   linux:
-    name: 'Linux'
+    name: Linux
     runs-on: ubuntu-24.04
     container: debian:11-slim
+
     outputs:
       app-version: ${{ steps.app-version.outputs.version }}
-
-    env:
-      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
     steps:
       - name: Install dependencies
@@ -150,155 +129,84 @@ jobs:
           apt-get update
           apt-get install -y \
             gcc-multilib g++-multilib \
-            build-essential \
-            libc6-dev libc6-dev-i386 \
-            git cmake rsync \
-            g++ gcc
-
-      - name: Configure
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+            build-essential libc6-dev libc6-dev-i386 \
+            git cmake rsync p7zip-full gnupg
 
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: GPG Import
+      - name: Build
         run: |
-          echo "${{ secrets.PUB_ASC }}" > "${{ secrets.PUB_ASC_FILE }}"
-          echo "${{ secrets.KEY_ASC }}" > "${{ secrets.KEY_ASC_FILE }}"
+          rm -rf build
+          CC=gcc CXX=g++ cmake -B build
+          cmake --build build -j8
 
-          # Import the public key
-          gpg --batch --yes --import "${{ secrets.PUB_ASC_FILE }}"
-          if [[ $? -ne 0 ]]; then
-            echo "Error: Failed to import the public key"
-            exit 1
-          fi
-          
-          # Import the private key
-          gpg --batch --yes --import "${{ secrets.KEY_ASC_FILE }}"
-          if [[ $? -ne 0 ]]; then
-            echo "Error: Failed to import the private key"
-            exit 2
-          fi
-          
-          # Extract the fingerprint of the imported public key
-          GPG_LINUX_FINGERPRINT=$(gpg --list-keys --with-colons | grep '^fpr' | head -n 1 | cut -d: -f10)
-          
-          # Check if the fingerprint was extracted
-          if [[ -z "$GPG_LINUX_FINGERPRINT" ]]; then
-            echo "Error: Failed to extract the fingerprint of the key"
-            exit 3
-          fi
-          
-          # Set the trust level for the key
-          echo "$GPG_LINUX_FINGERPRINT:6:" | gpg --batch --import-ownertrust
-          if [ $? -ne 0 ]; then
-            echo "Error: Failed to set trust for the key $GPG_LINUX_FINGERPRINT"
-            exit 4
-          fi
-          
-          echo "Key $GPG_LINUX_FINGERPRINT successfully imported and trusted"
-          gpg --list-keys
-
-          #export for global use
-          echo "GPG_LINUX_FINGERPRINT=$GPG_LINUX_FINGERPRINT" >> $GITHUB_ENV
-        shell: bash
-        if: github.event_name != 'pull_request'
-
-      - name: Build using GCC Compiler
-        run: |
-          rm -rf build && CC=gcc CXX=g++ cmake -B build && cmake --build build -j8
-
-      - name: Reading appversion.h
+      - name: Read version
         id: app-version
-        run: |
-          if [ -e "version/appversion.h" ]; then
-            APP_VERSION=$(cat "version/appversion.h" | grep -wi '#define APP_VERSION_STRD' | sed -e 's/#define APP_VERSION_STRD[ \t\r\n\v\f]\+\(.*\)/\1/i' -e 's/\r//g')
-            if [ $? -ne 0 ]; then
-              APP_VERSION=""
-            else
-              # Remove quotes
-              APP_VERSION=$(echo $APP_VERSION | xargs)
-              echo "APP_VERSION=${APP_VERSION}" >> $GITHUB_ENV
-            fi
-          fi
-          echo "version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
         shell: bash
+        run: |
+          APP_VERSION=$(grep -wi 'APP_VERSION_STRD' version/appversion.h | sed -E 's/.*"(.*)".*/\1/')
+          echo "version=$APP_VERSION" >> $GITHUB_OUTPUT
 
-      - name: Prepare Config files
+      - name: Prepare files
         run: |
           mkdir -p publish/addons/resemiclip
           rsync -a dist/ publish/addons/resemiclip/
+          mv build/resemiclip_mm_i386.so publish/addons/resemiclip/
 
-      - name: Copy Binary files
-        run: |
-          mv build/resemiclip_mm_i386.so publish/addons/resemiclip/resemiclip_mm_i386.so
-
-      - name: Deploy artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
-        id: upload-job
         with:
           name: linux32
           path: publish/*
 
   publish:
-    name: 'Publish'
+    name: Publish
     runs-on: ubuntu-latest
     needs: [windows, linux]
 
     steps:
-      - name: Deploying linux artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: linux32
 
-      - name: Deploying windows artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: win32
 
-      - name: Packaging binaries
-        id: packaging-job
-        if: |
-          github.event_name == 'release' &&
-          github.event.action == 'published' &&
-          startsWith(github.ref, 'refs/tags/')
+      - name: Package & Sign
+        if: github.event_name == 'release'
+        shell: bash
         run: |
 
-          # new runner, niw signs
-          echo "${{ secrets.PUB_ASC }}" > "${{ secrets.PUB_ASC_FILE }}"
-          echo "${{ secrets.KEY_ASC }}" > "${{ secrets.KEY_ASC_FILE }}"
-          gpg --batch --yes --import "${{ secrets.PUB_ASC_FILE }}"
-          gpg --batch --yes --import "${{ secrets.KEY_ASC_FILE }}"
-          GPG_LINUX_FINGERPRINT=$(gpg --list-keys --with-colons | grep '^fpr' | head -n 1 | cut -d: -f10)
-          echo "$GPG_LINUX_FINGERPRINT:6:" | gpg --batch --import-ownertrust
-          echo "GPG_LINUX_FINGERPRINT=$GPG_LINUX_FINGERPRINT" >> $GITHUB_ENV
+          if [ -z "${{ secrets.PUB_ASC }}" ] || [ -z "${{ secrets.KEY_ASC }}" ]; then
+            echo "Missing GPG secrets"
+            exit 1
+          fi
 
-          sign_file() {
-            local file=$1
-            gpg --batch --yes --detach-sign --armor -u "$GPG_LINUX_FINGERPRINT" "$file"
-            if [ $? -ne 0 ]; then
-              echo "Error: Failed to sign $file"
-              exit 2
-            fi
-            echo "$file signed successfully."
-          }
-          
-          # Pack and sign final archive
-          7z a -tzip resemiclip-${{ needs.linux.outputs.app-version }}.zip addons/
-          sign_file "resemiclip-${{ env.APP_VERSION }}.zip"
+          echo "${{ secrets.PUB_ASC }}" > pubkey.asc
+          echo "${{ secrets.KEY_ASC }}" > privatekey.asc
 
-      - name: Publish artifacts
+          gpg --batch --yes --import pubkey.asc
+          gpg --batch --yes --import privatekey.asc
+
+          FPR=$(gpg --list-keys --with-colons | grep '^fpr' | head -n1 | cut -d: -f10)
+          echo "$FPR:6:" | gpg --batch --import-ownertrust
+
+          VERSION="${{ needs.linux.outputs.app-version }}"
+
+          7z a -tzip resemiclip-${VERSION}.zip addons/
+
+          gpg --batch --yes --detach-sign --armor -u "$FPR" resemiclip-${VERSION}.zip
+
+      - name: Publish Release
+        if: github.event_name == 'release'
         uses: softprops/action-gh-release@v1
-        id: publish-job
-        if: |
-          startsWith(github.ref, 'refs/tags/') &&
-          steps.packaging-job.outcome == 'success'
         with:
           files: |
             *.zip
-            *.7z
             *.asc
         env:
           GITHUB_TOKEN: ${{ secrets.API_TOKEN }}
